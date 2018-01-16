@@ -512,6 +512,8 @@ class Switches(app_manager.RyuApp):
     LINK_TIMEOUT = TIMEOUT_CHECK_PERIOD * 2
     LINK_LLDP_DROP = 5
 
+    LLDP_FLOW_COOKIE = 0x20000000000011D9
+
     def __init__(self, *args, **kwargs):
         super(Switches, self).__init__(*args, **kwargs)
 
@@ -596,6 +598,54 @@ class Switches(app_manager.RyuApp):
 
         return True
 
+    @set_ev_cls(ofp_event.EventOFPPortStateChange,
+                [MAIN_DISPATCHER, DEAD_DISPATCHER])
+    def port_state_change_handler(self, ev):
+        print("PORT CHANGE")
+        dp = ev.datapath
+        assert dp is not None
+        LOG.debug(dp)
+
+        ev.state = MAIN_DISPATCHER
+        self.install_flow = True
+        if self.install_flow:
+            ofproto = dp.ofproto
+            ofproto_parser = dp.ofproto_parser
+
+            # TODO:XXX need other versions
+            if ofproto.OFP_VERSION == ofproto_v1_0.OFP_VERSION:
+                rule = nx_match.ClsRule()
+                rule.set_dl_dst(addrconv.mac.text_to_bin(
+                                lldp.LLDP_MAC_NEAREST_BRIDGE))
+                rule.set_dl_type(ETH_TYPE_LLDP)
+                actions = [ofproto_parser.OFPActionOutput(
+                    ofproto.OFPP_CONTROLLER, self.LLDP_PACKET_LEN)]
+                dp.send_flow_mod(
+                    rule=rule, cookie=self.LLDP_FLOW_COOKIE,
+                    command=ofproto.OFPFC_ADD, idle_timeout=0,
+                    hard_timeout=0, actions=actions, priority=0xFFFF)
+            elif ofproto.OFP_VERSION >= ofproto_v1_2.OFP_VERSION:
+                match = ofproto_parser.OFPMatch(
+                    eth_type=ETH_TYPE_LLDP,
+                    eth_dst=lldp.LLDP_MAC_NEAREST_BRIDGE)
+                # OFPCML_NO_BUFFER is set so that the LLDP is not
+                # buffered on switch
+                parser = ofproto_parser
+                actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                                  ofproto.OFPCML_NO_BUFFER
+                                                  )]
+                inst = [parser.OFPInstructionActions(
+                        ofproto.OFPIT_APPLY_ACTIONS, actions)]
+                mod = parser.OFPFlowMod(datapath=dp, match=match,
+                                        cookie=self.LLDP_FLOW_COOKIE,
+                                        idle_timeout=0, hard_timeout=0,
+                                        instructions=inst,
+                                        priority=0xFFFF)
+                dp.send_msg(mod)
+            else:
+                LOG.error('cannot install flow. unsupported version. %x',
+                          dp.ofproto.OFP_VERSION)
+
     @set_ev_cls(ofp_event.EventOFPStateChange,
                 [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def state_change_handler(self, ev):
@@ -636,9 +686,9 @@ class Switches(app_manager.RyuApp):
                     actions = [ofproto_parser.OFPActionOutput(
                         ofproto.OFPP_CONTROLLER, self.LLDP_PACKET_LEN)]
                     dp.send_flow_mod(
-                        rule=rule, cookie=0, command=ofproto.OFPFC_ADD,
-                        idle_timeout=0, hard_timeout=0, actions=actions,
-                        priority=0xFFFF)
+                        rule=rule, cookie=self.LLDP_FLOW_COOKIE,
+                        command=ofproto.OFPFC_ADD, idle_timeout=0,
+                        hard_timeout=0, actions=actions, priority=0xFFFF)
                 elif ofproto.OFP_VERSION >= ofproto_v1_2.OFP_VERSION:
                     match = ofproto_parser.OFPMatch(
                         eth_type=ETH_TYPE_LLDP,
@@ -652,6 +702,7 @@ class Switches(app_manager.RyuApp):
                     inst = [parser.OFPInstructionActions(
                             ofproto.OFPIT_APPLY_ACTIONS, actions)]
                     mod = parser.OFPFlowMod(datapath=dp, match=match,
+                                            cookie=self.LLDP_FLOW_COOKIE,
                                             idle_timeout=0, hard_timeout=0,
                                             instructions=inst,
                                             priority=0xFFFF)
